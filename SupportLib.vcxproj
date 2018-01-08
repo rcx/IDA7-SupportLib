@@ -90,7 +90,7 @@
     <IntDir>$(Configuration)\</IntDir>
     <LinkIncremental>false</LinkIncremental>
     <GenerateManifest>false</GenerateManifest>
-    <TargetName>IdaOggPlayer</TargetName>
+    <TargetName>SupportLib</TargetName>
     <TargetExt>.LiB</TargetExt>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
