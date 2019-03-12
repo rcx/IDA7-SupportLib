@@ -13,10 +13,12 @@
 #define USE_DANGEROUS_FUNCTIONS
 #define USE_STANDARD_FILE_FUNCTIONS
 #define NO_OBSOLETE_FUNCS
-#include <ida.hpp>
 #pragma warning(push)
-#pragma warning(disable:4267) // "conversion from 'size_t' to 'xxx', possible loss of data"
+#pragma warning(disable:4244)
+#pragma warning(disable:4267)
+#include <ida.hpp>
 #include <typeinf.hpp>
+#include <search.hpp> // find_binary2
 #pragma warning(pop)
 
 #include <Utility.h>
@@ -25,29 +27,31 @@
 #pragma comment(lib, "ida.lib")
 #pragma comment(lib, "Winmm.lib")
 
+static ALIGN(16) TIMESTAMP performanceFrequency = 0;
+struct onInit
+{
+	onInit()
+	{
+		LARGE_INTEGER large2;
+		QueryPerformanceFrequency(&large2);
+		performanceFrequency = (TIMESTAMP)large2.QuadPart;
+	}
 
-// Get floating elapsed seconds
+} static onInitUtility;
+
+// Get fractional floating elapsed seconds
 TIMESTAMP getTimeStamp()
 {
 	LARGE_INTEGER large;
 	QueryPerformanceCounter(&large);
-
-	static ALIGN(16) TIMESTAMP clockFreq = 0;
-	if(clockFreq == 0)
-	{
-		LARGE_INTEGER large2;
-		QueryPerformanceFrequency(&large2);
-		clockFreq = (TIMESTAMP) large2.QuadPart;
-	}
-
-	return((TIMESTAMP) large.QuadPart / clockFreq);
+	return((TIMESTAMP) large.QuadPart / performanceFrequency);
 }
 
-// Get lower precision elapsed seconds
+// Get elapsed seconds with millisecond resolution
 TIMESTAMP getTimeStampLow()
 {
     // 64bit version requires Windows Vista or greater..
-    return((TIMESTAMP)GetTickCount64() / (TIMESTAMP) 1000.0);
+    return((TIMESTAMP) GetTickCount64() / (TIMESTAMP) 1000.0);
 }
 
 // Return a pretty comma formatted string for a given unsigned 64bit number number
@@ -65,27 +69,27 @@ LPSTR prettyNumberString(UINT64 n, __bcount(32) LPSTR buffer)
             c = 0;
         }
     } while (n);
-    strncpy(buffer, s.c_str(), 31);
+    strncpy_s(buffer, 32, s.c_str(), 31);
     return(buffer);
 }
 
 // Get a pretty delta time string
 LPCSTR timeString(TIMESTAMP time)
 {
-	static char szBuff[64];
+	static char buffer[64];
 
 	if(time >= HOUR)
-		_snprintf(szBuff, SIZESTR(szBuff), "%.2f hours", (time / (TIMESTAMP) HOUR));
+		sprintf_s(buffer, sizeof(buffer), "%.2f hours", (time / (TIMESTAMP) HOUR));
 	else
 	if(time >= MINUTE)
-		_snprintf(szBuff, SIZESTR(szBuff), "%.2f minutes", (time / (TIMESTAMP) MINUTE));
+		sprintf_s(buffer, sizeof(buffer), "%.2f minutes", (time / (TIMESTAMP) MINUTE));
 	else
 	if(time < (TIMESTAMP) 0.01)
-		_snprintf(szBuff, SIZESTR(szBuff), "%.2f milliseconds", (time * (TIMESTAMP) 1000.0));
+		sprintf_s(buffer, sizeof(buffer), "%.2f milliseconds", (time * (TIMESTAMP) 1000.0));
 	else
-		_snprintf(szBuff, SIZESTR(szBuff), "%.2f seconds", time);
+		sprintf_s(buffer, sizeof(buffer), "%.2f seconds", time);
 
-	return(szBuff);
+	return(buffer);
 }
 
 // Returns a pretty factional byte size string for given input size
@@ -101,9 +105,9 @@ LPCSTR byteSizeString(UINT64 bytes)
 	    double fSize = ((double) bytes / (double) _Size); \
 	    double fIntegral; double fFractional = modf(fSize, &fIntegral); \
 	    if(fFractional > 0.05) \
-		    _snprintf(buffer, SIZESTR(buffer), ("%.1f " ## _Suffix), fSize); \
+		    sprintf_s(buffer, sizeof(buffer), ("%.1f " ## _Suffix), fSize); \
                                                                 else \
-		    _snprintf(buffer, SIZESTR(buffer), ("%.0f " ## _Suffix), fIntegral); \
+		    sprintf_s(buffer, sizeof(buffer), ("%.0f " ## _Suffix), fIntegral); \
             }
 
     static char buffer[32];
@@ -120,28 +124,19 @@ LPCSTR byteSizeString(UINT64 bytes)
     if (bytes >= KILLOBYTE)
         BYTESTR(KILLOBYTE, "KB")
     else
-    _snprintf(buffer, SIZESTR(buffer), "%u byte%c", (UINT) bytes, (bytes == 1) ? 0 : 's');
+		sprintf_s(buffer, sizeof(buffer), "%u byte%c", (UINT) bytes, (bytes == 1) ? 0 : 's');
 
     return(buffer);
 }
 
+
 // Get character size of string at given address
+// Note: Byte size encoding like UTF-8 not considered
 UINT getChracterLength(int strtype, UINT byteCount)
 {
-    static const UINT bytesPerChar[] =
-    {
-        1, // #define ASCSTR_TERMCHR  0              ///< Character-terminated ASCII string.
-        1, // #define ASCSTR_PASCAL   1              ///< Pascal-style ASCII string (one byte length prefix)
-        1, // #define ASCSTR_LEN2     2              ///< Pascal-style, two-byte length prefix
-        2, // #define ASCSTR_UNICODE  3              ///< Unicode string (UTF-16)
-        2, // #define ASCSTR_UTF16    3              ///< same
-        4, // #define ASCSTR_LEN4     4              ///< Pascal-style, four-byte length prefix
-        2, // #define ASCSTR_ULEN2    5              ///< Pascal-style Unicode, two-byte length prefix
-        2, // #define ASCSTR_ULEN4    6              ///< Pascal-style Unicode, four-byte length prefix
-        4, // #define ASCSTR_UTF32    7              ///< four-byte Unicode codepoints
-    };
-    return(byteCount / bytesPerChar[strtype]);
+    return(byteCount / get_strtype_bpu(strtype));
 }
+
 
 // Output formated text to debugger channel
 void trace(const char *format, ...)
@@ -149,20 +144,20 @@ void trace(const char *format, ...)
     if (format)
     {
         va_list vl;
-		// The OS buffer for these messages is a page/4096 size
-        char str[4096]; str[SIZESTR(str)] = 0;
+		// The OS buffer for these messages is a page/4096 size max
+        char buffer[4096];
         va_start(vl, format);
-        _vsntprintf(str, (sizeof(str) - 1), format, vl);
+        _vsntprintf_s(buffer, sizeof(buffer), SIZESTR(buffer), format, vl);
         va_end(vl);
-        OutputDebugString(str);
+        OutputDebugString(buffer);
     }
 }
 
 // Get a nice line of disassembled code text sans color tags
-void getDisasmText(ea_t ea, qstring &s)
+void getDisasmText(ea_t ea, __out qstring &s)
 {
-    if (generate_disasm_line(&s, ea))
-        tag_remove(&s, s.c_str()); // haha is this correct??
+    s.clear();
+	generate_disasm_line(&s, ea, (GENDSM_FORCE_CODE | GENDSM_REMOVE_TAGS));
 }
 
 // Return true if passed string is only hex digits
@@ -177,6 +172,8 @@ BOOL isHexStr(LPCSTR str)
     return(TRUE);
 }
 
+// Return file size for given file handle
+// Returns -1 on error
 long fsize(FILE *fp)
 {
     long psave, endpos;
@@ -201,90 +198,114 @@ long fsize(FILE *fp)
 LPSTR replaceExtInPath(__inout_bcount(MAX_PATH) LPSTR path, __in LPSTR pathNew)
 {
     char szDrive[_MAX_DRIVE], szDir[_MAX_DIR], szName[_MAX_FNAME];
-    _splitpath(path, szDrive, szDir, szName, NULL);
-    _makepath(path, szDrive, szDir, szName, pathNew);
+    _splitpath_s(path, szDrive, _MAX_DRIVE, szDir, _MAX_DIR, szName, _MAX_FNAME, NULL, 0);
+    _makepath_s(path, MAX_PATH, szDrive, szDir, szName, pathNew);
     return(path);
+}
+
+// Since find_binary() is now deprecated
+// Pattern in style IDA binary search style "48 8D 15 ?? ?? ?? ?? 48 8D 0D"
+/*
+ea_t find_binary2(ea_t start_ea, ea_t end_ea, LPCSTR pattern, LPCSTR file, int lineNumber)
+{
+	compiled_binpat_vec_t searchVec;	
+	qstring errorStr;
+	if (parse_binpat_str(&searchVec, start_ea, pattern, 16, PBSENC_DEF1BPU, &errorStr))	
+		return bin_search2(start_ea, end_ea, searchVec, (BIN_SEARCH_FORWARD | BIN_SEARCH_NOBREAK | BIN_SEARCH_NOSHOW));	
+	else
+		msg("** parse_binpat_str() failed! Reason: \"%s\" @ %s, line #%d **", errorStr.c_str(), __FILE__, __LINE__);
+	return BADADDR;
+}
+*/
+// Patch thanks to @Karaulov
+ea_t find_binary2(ea_t start_ea, ea_t end_ea, LPCSTR pattern, LPCSTR file, int lineNumber)
+{
+	return find_binary(start_ea, end_ea, pattern, 16, (SEARCH_NEXT | SEARCH_NOBRK | SEARCH_NOSHOW));
 }
 
 
 // ================================================================================================
-// From IDA SDK "bytes.hpp"
-// Comments say we're not supposed to use these internal defs. To use the accessors like
-// isByte(), byteflag(), etc. But then these haven't changed since at least 5.8'ish and it's
-// so musch easier this way.
-#define DT_TYPE     0xF0000000L         // Mask for DATA typing
-#define FF_BYTE     0x00000000L         // byte
-#define FF_WORD     0x10000000L         // word
-#define FF_DWRD     0x20000000L         // double word
-#define FF_QWRD     0x30000000L         // quadro word
-#define FF_TBYT     0x40000000L         // tbyte
-#define FF_ASCI     0x50000000L         // ASCII ?
-#define FF_STRU     0x60000000L         // Struct ?
-#define FF_OWRD     0x70000000L         // octaword (16 bytes)
-#define FF_FLOAT    0x80000000L         // float
-#define FF_DOUBLE   0x90000000L         // double
-#define FF_PACKREAL 0xA0000000L         // packed decimal real
-#define FF_ALIGN    0xB0000000L         // alignment directive
-#define FF_3BYTE    0xC0000000L         // 3-byte data (only with support from the processor module)
-#define FF_CUSTOM   0xD0000000L         // custom data type
-#define FF_YWRD     0xE0000000L         // ymm word (32 bytes/256 bits)
+// IDA flag dumping utility
 
-#undef FF_JUMP
-#define MS_CODE		0xF0000000L
-#define FF_FUNC		0x10000000L			// function start?
-//					0x20000000L         // not used
-#define FF_IMMD		0x40000000L         // Has Immediate value ?
-#define FF_JUMP		0x80000000L         // Has jump table or switch_info?
+// Duplicated from IDA SDK "bytes.hpp" since using these directly makes the code possible or just simpler
+// * Type
+#define FF_CODE 0x00000600LU	// Code
+#define FF_DATA 0x00000400LU    // Data
+#define FF_TAIL 0x00000200LU    // Tail; second, third (tail) byte of instruction or data
+#define FF_UNK  0x00000000LU    // Unexplored
 
-#define MS_0TYPE	0x00F00000L         // Mask for 1st arg typing
-#define FF_0VOID	0x00000000L         // Void (unknown)?
-#define FF_0NUMH	0x00100000L         // Hexadecimal number?
-#define FF_0NUMD	0x00200000L         // Decimal number?
-#define FF_0CHAR	0x00300000L         // Char ('x')?
-#define FF_0SEG		0x00400000L         // Segment?
-#define FF_0OFF		0x00500000L         // Offset?
-#define FF_0NUMB	0x00600000L         // Binary number?
-#define FF_0NUMO	0x00700000L         // Octal number?
-#define FF_0ENUM	0x00800000L         // Enumeration?
-#define FF_0FOP		0x00900000L         // Forced operand?
-#define FF_0STRO	0x00A00000L         // Struct offset?
-#define FF_0STK		0x00B00000L         // Stack variable?
-#define FF_0FLT		0x00C00000L         // Floating point number?
-#define FF_0CUST	0x00D00000L         // Custom format type?
+// * Data F0000000
+#define DT_TYPE		0xF0000000	// Data type mask
+#define FF_BYTE     0x00000000	// byte
+#define FF_WORD     0x10000000	// word
+#define FF_DWORD    0x20000000  // double word
+#define FF_QWORD    0x30000000  // quad word
+#define FF_TBYTE    0x40000000  // triple byte
+#define FF_STRLIT   0x50000000  // string literal
+#define FF_STRUCT   0x60000000  // struct variable
+#define FF_OWORD    0x70000000  // octal word/XMM word (16 bytes/128 bits)
+#define FF_FLOAT    0x80000000  // float
+#define FF_DOUBLE   0x90000000  // double
+#define FF_PACKREAL 0xA0000000  // packed decimal real
+#define FF_ALIGN    0xB0000000  // alignment directive
+//                  0xC0000000  // reserved
+#define FF_CUSTOM   0xD0000000  // custom data type
+#define FF_YWORD    0xE0000000  // YMM word (32 bytes/256 bits)
+#define FF_ZWORD    0xF0000000  // ZMM word (64 bytes/512 bits)
 
-#define MS_1TYPE	0x0F000000L			// Mask for 2nd arg typing
-#define FF_1VOID	0x00000000L         // Void (unknown)?
-#define FF_1NUMH	0x01000000L         // Hexadecimal number?
-#define FF_1NUMD	0x02000000L         // Decimal number?
-#define FF_1CHAR	0x03000000L         // Char ('x')?
-#define FF_1SEG		0x04000000L         // Segment?
-#define FF_1OFF		0x05000000L         // Offset?
-#define FF_1NUMB	0x06000000L         // Binary number?
-#define FF_1NUMO	0x07000000L         // Octal number?
-#define FF_1ENUM	0x08000000L         // Enumeration?
-#define FF_1FOP		0x09000000L         // Forced operand?
-#define FF_1STRO	0x0A000000L         // Struct offset?
-#define FF_1STK		0x0B000000L         // Stack variable?
-#define FF_1FLT		0x0C000000L         // Floating point number?
-#define FF_1CUST	0x0D000000L         // Custom format type?
+// * Code F0000000
+#define MS_CODE 0xF0000000LU	// Code type mask
+#define FF_FUNC 0x10000000LU	// Function start
+//              0x20000000LU    // Reserved
+#define FF_IMMD 0x40000000LU    // Has Immediate value
+#define FF_JUMP 0x80000000LU    // Has jump table or switch_info
 
-#define FF_FLOW		0x00010000L         // Exec flow from prev instruction
-#define FF_SIGN		0x00020000L         // Inverted sign of operands
-#define FF_BNOT		0x00040000L         // Bitwise negation of operands
-#define FF_VAR		0x00080000L         // is variable byte?
+// * Instruction/Data operands 0F000000
+#define MS_1TYPE 0x0F000000LU   // Mask for the type of other operands
+#define FF_1VOID 0x00000000LU   // Void (unknown)
+#define FF_1NUMH 0x01000000LU   // Hexadecimal number
+#define FF_1NUMD 0x02000000LU   // Decimal number
+#define FF_1CHAR 0x03000000LU   // Char ('x')
+#define FF_1SEG  0x04000000LU   // Segment
+#define FF_1OFF  0x05000000LU   // Offset
+#define FF_1NUMB 0x06000000LU   // Binary number
+#define FF_1NUMO 0x07000000LU   // Octal number
+#define FF_1ENUM 0x08000000LU   // Enumeration
+#define FF_1FOP  0x09000000LU   // Forced operand
+#define FF_1STRO 0x0A000000LU   // Struct offset
+#define FF_1STK  0x0B000000LU   // Stack variable
+#define FF_1FLT  0x0C000000LU   // Floating point number
+#define FF_1CUST 0x0D000000LU   // Custom representation
 
-#define FF_REF		0x00001000L         // has references
-#define FF_LINE		0x00002000L         // Has next or prev lines ?
-#define FF_NAME		0x00004000L         // Has name ?
-#define FF_LABL		0x00008000L         // Has dummy name?
+#define MS_0TYPE 0x00F00000LU	// Mask for 1st arg typing
+#define FF_0VOID 0x00000000LU   // Void (unknown)
+#define FF_0NUMH 0x00100000LU   // Hexadecimal number
+#define FF_0NUMD 0x00200000LU   // Decimal number
+#define FF_0CHAR 0x00300000LU   // Char ('x')
+#define FF_0SEG  0x00400000LU   // Segment
+#define FF_0OFF  0x00500000LU   // Offset
+#define FF_0NUMB 0x00600000LU   // Binary number
+#define FF_0NUMO 0x00700000LU   // Octal number
+#define FF_0ENUM 0x00800000LU   // Enumeration
+#define FF_0FOP  0x00900000LU   // Forced operand
+#define FF_0STRO 0x00A00000LU   // Struct offset
+#define FF_0STK  0x00B00000LU   // Stack variable
+#define FF_0FLT  0x00C00000LU   // Floating point number
+#define FF_0CUST 0x00D00000LU   // Custom representation
 
-#define FF_COMM		0x00000800L         // Has comment ?
-#define FF_CODE		0x00000600L         // Code ?
-#define FF_DATA		0x00000400L         // Data ?
-#define FF_TAIL		0x00000200L         // Tail ?
-#define FF_IVL		0x00000100L         // Byte has value ?
-#define FF_UNK		0x00000000L         // Unknown ?
-
+// * State information 000FF800
+#define MS_COMM   0x000FF800    // Mask of common bits
+#define FF_FLOW   0x00010000    // Exec flow from prev instruction
+#define FF_SIGN   0x00020000    // Inverted sign of operands
+#define FF_BNOT   0x00040000    // Bitwise negation of operands
+#define FF_UNUSED 0x00080000    // unused bit (was used for variable bytes)
+#define FF_COMM   0x00000800    // Has comment 
+#define FF_REF    0x00001000    // has references
+#define FF_LINE   0x00002000    // Has next or prev lines 
+#define FF_NAME   0x00004000    // Has name 
+#define FF_LABL   0x00008000    // Has dummy name
+// 000001FF
+#define FF_IVL  0x00000100LU	// Has byte value in 000000FF
 
 // Decode IDA address flags value into a readable string
 void idaFlags2String(flags_t f, __out qstring &s, BOOL withValue)
@@ -300,18 +321,21 @@ void idaFlags2String(flags_t f, __out qstring &s, BOOL withValue)
 		{
 			case FF_BYTE    : s += "FF_BYTE";     break;
 			case FF_WORD    : s += "FF_WORD";     break;
-			case FF_DWRD    : s += "FF_DWRD";     break;
-			case FF_QWRD    : s += "FF_QWRD";     break;
-			case FF_TBYT    : s += "FF_TBYT";     break;
-			case FF_ASCI    : s += "FF_ASCI";     break;
-			case FF_STRU    : s += "FF_STRU";     break;
-			case FF_OWRD    : s += "FF_OWRD";     break;
-			case FF_FLOAT   : s += "FF_FLOAT";	   break;
+			case FF_DWORD	: s += "FF_DWORD";    break;
+			case FF_QWORD	: s += "FF_QWORD";    break;
+			case FF_TBYTE	: s += "FF_TBYTE";    break;
+			case FF_STRLIT	: s += "FF_STRLIT";   break;
+			case FF_STRUCT  : s += "FF_STRUCT";   break;
+			case FF_OWORD	: s += "FF_OWORD";    break;
+			case FF_FLOAT   : s += "FF_FLOAT";	  break;
 			case FF_DOUBLE  : s += "FF_DOUBLE";   break;
 			case FF_PACKREAL: s += "FF_PACKREAL"; break;
 			case FF_ALIGN   : s += "FF_ALIGN";    break;
-			case FF_3BYTE   : s += "FF_3BYTE";    break;
-			case FF_CUSTOM  : s += "FF_CUSTOM";   break;
+
+			case FF_CUSTOM	: s += "FF_CUSTOM";   break;
+			case FF_YWORD	: s += "FF_YWORD";    break;
+			case FF_ZWORD	: s += "FF_ZWORD";    break;
+
 		};
 		first = FALSE;
 	}
@@ -380,7 +404,7 @@ void idaFlags2String(flags_t f, __out qstring &s, BOOL withValue)
 		FTEST(FF_FLOW);
 		FTEST(FF_SIGN);
 		FTEST(FF_BNOT);
-		FTEST(FF_VAR);
+		FTEST(FF_UNUSED);
 	}
 
 	// 0000F000
@@ -405,11 +429,11 @@ void idaFlags2String(flags_t f, __out qstring &s, BOOL withValue)
 	if(f & FF_COMM) s += ", FF_COMM";
 	if(f & FF_IVL)  s += ", FF_IVL";
 
-	// 000000FF optional value
+	// 000000FF optional value dump
     if (withValue && (f & FF_IVL))
 	{
-        char buffer[16]; buffer[SIZESTR(buffer)] = 0;
-        _snprintf(buffer, SIZESTR(buffer), ", value: %02X", (f & 0xFF));
+        char buffer[16];
+        sprintf_s(buffer, sizeof(buffer), ", value: %02X", (f & 0xFF));
 		s += buffer;
 	}
 
@@ -420,6 +444,6 @@ void idaFlags2String(flags_t f, __out qstring &s, BOOL withValue)
 void dumpFlags(ea_t ea, BOOL withValue)
 {
     qstring s;
-    idaFlags2String(get_full_flags(ea), s, withValue);
+    idaFlags2String(get_flags(ea), s, withValue);
     msg(EAFORMAT " Flags: %s\n", ea, s.c_str());
 }

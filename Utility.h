@@ -3,6 +3,7 @@
 // File: Utility.h
 // Desc: IDA utility support
 // Auth: Sirmabus 2015
+// Updated for IDA 7
 // ****************************************************************************
 #pragma once
 
@@ -19,21 +20,22 @@ LPCSTR  timeString(TIMESTAMP Time);
 LPSTR   prettyNumberString(UINT64 n, __bcount(32) LPSTR buffer);
 LPCTSTR byteSizeString(UINT64 uSize);
 UINT getChracterLength(int strtype, UINT byteCount);
-void getDisasmText(ea_t ea, qstring &s);
+void getDisasmText(ea_t ea, __out qstring &s);
 void idaFlags2String(flags_t f, __out qstring &s, BOOL withValue = FALSE);
 void dumpFlags(ea_t ea, BOOL withValue = FALSE);
 BOOL isHexStr(LPCSTR str);
 long fsize(FILE *fp);
-LPSTR replaceExtInPath(__inout_bcount(MAX_PATH) LPSTR path, __in LPSTR pathNew);
+LPSTR replaceExtInPath(__inout_bcount(MAX_PATH) LPSTR path, __out LPSTR pathNew);
+ea_t find_binary2(ea_t start_ea, ea_t end_ea, LPCSTR pattern, LPCSTR file, int lineNumber);
 
-// Returns TRUE if there is a name at address that is unique (I.E. user, or from PDB, etc., and not IDA auto-generated)
-inline BOOL hasUniqueName(ea_t ea) { return(has_name(get_flags(ea))); }
+#define FIND_BINARY(_start, _end, _pattern) find_binary2((_start), (_end), (_pattern), __FILE__, __LINE__)
+//#define FIND_BINARY(_start, _end, _pattern) find_binary((_start), (_end), (_pattern), 16, (SEARCH_DOWN | SEARCH_NOBRK | SEARCH_NOSHOW));
 
 // Return TRUE if at address is a string (ASCII, Unicode, etc.)
 inline BOOL isString(ea_t ea){ return(is_strlit(get_flags(ea))); }
 
 // Get string type by address
-// Should process the result with "get_str_type_code()" to filter any 
+// Should process the result with "get_str_type_code()" to filter any
 // potential string encoding from the base type.
 inline int getStringType(ea_t ea)
 {
@@ -44,16 +46,11 @@ inline int getStringType(ea_t ea)
         return(STRTYPE_C);
 }
 
-
 // Size of string sans terminator
 #define SIZESTR(x) (sizeof(x) - 1)
 
-// Data and function alignment
+// Set object (data or function) alignment
 #define ALIGN(_x_) __declspec(align(_x_))
-
-// Tick IDA's Qt message pump to show msg() output
-// With my WaitBoxEx* library included
-#define refreshUI() WaitBox::processIdaEvents()
 
 #define CATCH() catch (...) { msg("** Exception in %s()! ***\n", __FUNCTION__); }
 
@@ -63,6 +60,7 @@ inline int getStringType(ea_t ea)
 	BYTE space_##name[sizeof(type) + (16-1)]; \
 	type &name = *reinterpret_cast<type *>((UINT_PTR) (space_##name + (16-1)) & ~(16-1))
 
+// Disable copy and assign in object definitions
 #define DISALLOW_COPY_AND_ASSIGN(TypeName) \
     TypeName(TypeName&) = delete;          \
     void operator=(TypeName) = delete;
@@ -77,19 +75,20 @@ template <class T> inline void swap_t(T &a, T &b)
 // ea_t zero padded hex number format
 #ifndef __EA64__
 #define EAFORMAT "%08X"
+#define EAFORMAT2 "%X"
 #else
 #define EAFORMAT "%016I64X"
+#define EAFORMAT2 "%I64X"
 #endif
 
-
+// Now you can use the #pragma message to add the location of the message:
+// Examples:
+// #pragma message(__LOC__ "important part to be changed")
+// #pragma message(__LOC2__ "error C9901: wish that error would exist")
 #define __STR2__(x) #x
 #define __STR1__(x) __STR2__(x)
 #define __LOC__ __FILE__ "("__STR1__(__LINE__)") : Warning MSG: "
 #define __LOC2__ __FILE__ "("__STR1__(__LINE__)") : "
-// Now you can use the #pragma message to add the location of the message:
-//
-// #pragma message(__LOC__ "important part to be changed")
-// #pragma message(__LOC2__ "error C9901: wish that error would exist")
 
 // 32 bit flag sequential serializer
 struct SBITFLAG
